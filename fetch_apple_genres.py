@@ -8,9 +8,12 @@ from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 from bs4 import BeautifulSoup
 
 # =============================================================================
-# CONFIG
+# CONFIGURATION
 # =============================================================================
 WORKER_URL = os.environ.get("TURSO_WORKER_URL")
+
+PROCESS_LIMIT = 10 
+
 USER_AGENTS = [
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
     'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -57,14 +60,14 @@ def resolve_odesli(spotify_url):
         entity_id = data.get('id')
         entity_type = data.get('type')
         
-        # Shortcut: Check if API gave the link directly (save a request)
+        # Shortcut: Check if API gave the link directly
         links = data.get('linksByPlatform', {})
         if 'appleMusic' in links:
             return links['appleMusic'].get('url')
             
     except Exception as e: return None
 
-    # 2. Get Page Data (Scraping Fallback - Critical for reliability)
+    # 2. Get Page Data (Scraping Fallback)
     if not entity_id or not entity_type: return None
     
     slug = 's' if entity_type == 'song' else 'a'
@@ -167,11 +170,11 @@ def resolve_squigly(spotify_url):
 def scrape_apple_metadata(apple_url):
     if not apple_url: return None
     
-    # Clean URL (Same logic as run_test.py, but applied centrally here)
+    # Clean URL
     apple_url = apple_url.replace("geo.music.apple.com", "music.apple.com")
     apple_url = re.sub(r'\.com/[a-z]{2}/', '.com/us/', apple_url)
     
-    # Ensure params are clean
+    # Clean Params
     try:
         parsed = urlparse(apple_url)
         query_params = parse_qs(parsed.query)
@@ -221,7 +224,6 @@ def process_track(spotify_id, isrc):
     results = []
     
     # 1. Fetch from all providers sequentially
-    
     link1 = resolve_odesli(spotify_url)
     if link1: 
         meta = scrape_apple_metadata(link1)
@@ -264,10 +266,14 @@ def run_job():
         print("Error: TURSO_WORKER_URL secret is missing.")
         return
 
-    print("--- 1. Fetching tracks missing Apple Genres ---")
+    # Determine limit
+    limit = PROCESS_LIMIT
+    if limit == 0:
+        limit = 50 # Production safety limit
+    
+    print(f"--- 1. Fetching tracks missing Apple Genres (Limit: {limit}) ---")
     try:
-        # Fetch 30 tracks at a time
-        res = requests.post(f"{WORKER_URL}/genres/find-missing-apple", json={"limit": 30}, timeout=30)
+        res = requests.post(f"{WORKER_URL}/genres/find-missing-apple", json={"limit": limit}, timeout=30)
         res.raise_for_status()
         data = res.json()
         tracks = data.get('tracks', [])
@@ -288,7 +294,7 @@ def run_job():
             if res:
                 updates.append(res)
             else:
-                # Mark as checked even if nothing found, to prevent infinite loops
+                # Mark as checked to prevent infinite loops on unfindable tracks
                 updates.append({
                     'isrc': t['isrc'],
                     'track_id': t['id'],
@@ -303,7 +309,6 @@ def run_job():
     if updates:
         print(f"--- 2. Sending {len(updates)} updates to Turso ---")
         try:
-            # Send to Worker (Duration validation is handled in Worker now)
             res = requests.post(f"{WORKER_URL}/genres", json=updates, timeout=30)
             if res.status_code == 200:
                 print("Success.")

@@ -10,10 +10,11 @@ from bs4 import BeautifulSoup
 # =============================================================================
 # CONFIG
 # =============================================================================
-WORKER_URL = os.environ.get("TURSO_WORKER_URL") # Defined in GitHub Secrets
+WORKER_URL = os.environ.get("TURSO_WORKER_URL")
 USER_AGENTS = [
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36'
 ]
 
 def get_headers():
@@ -41,68 +42,143 @@ def find_key_recursive(data, target_key):
     return found_values
 
 # =============================================================================
-# LINK RESOLVERS (ODESLI, TAPELINK, SQUIGLY)
+# METHOD 1: ODESLI (Hybrid: API ID -> Page Scrape)
 # =============================================================================
 def resolve_odesli(spotify_url):
+    session = requests.Session()
+    
+    # 1. Resolve ID via API
     try:
-        res = requests.get("https://api.odesli.co/resolve", params={'url': spotify_url}, headers=get_headers(), timeout=10)
+        res = session.get("https://api.odesli.co/resolve", params={'url': spotify_url}, headers=get_headers(), timeout=10)
+        if res.status_code == 429: return None # Rate Limit
         if res.status_code != 200: return None
-        data = res.json()
         
-        # Odesli often gives the API ID, we need to construct the link or scrape their landing page
-        # To save time, we look for the direct appleMusic link in their linksByPlatform if available
+        data = res.json()
+        entity_id = data.get('id')
+        entity_type = data.get('type')
+        
+        # Shortcut: Check if API gave the link directly (save a request)
         links = data.get('linksByPlatform', {})
         if 'appleMusic' in links:
             return links['appleMusic'].get('url')
-        return None 
-    except: return None
+            
+    except Exception as e: return None
 
-def resolve_tapelink(spotify_url):
+    # 2. Get Page Data (Scraping Fallback - Critical for reliability)
+    if not entity_id or not entity_type: return None
+    
+    slug = 's' if entity_type == 'song' else 'a'
     try:
-        headers = get_headers()
-        headers.update({'Origin': 'https://www.tapelink.io', 'Content-Type': 'application/json'})
-        res = requests.post("https://www.tapelink.io/api/generate-link", json={"url": spotify_url}, headers=headers, timeout=10)
-        if res.status_code != 200: return None
-        data = res.json()
-        share_stub = data.get('shareableLink')
-        if not share_stub: return None
-        
-        full_url = f"https://{share_stub}" if not share_stub.startswith("http") else share_stub
-        # We need to scrape the tapelink page to get the actual Apple Music link
-        page = requests.get(full_url, headers=headers, timeout=10)
+        page = session.get(f"https://song.link/{slug}/{entity_id}", headers=get_headers(), timeout=10)
         soup = BeautifulSoup(page.text, 'html.parser')
-        next_data = soup.find('script', id='__NEXT_DATA__')
-        if next_data:
-            jd = json.loads(next_data.string)
-            return jd['props']['pageProps']['initialSongData']['platforms'].get('apple_music')
-        return None
-    except: return None
-
-def resolve_squigly(spotify_url):
-    try:
-        headers = get_headers()
-        headers.update({'Origin': 'https://squigly.link', 'Content-Type': 'application/json'})
-        # 1. Create
-        res = requests.post("https://squigly.link/api/create", json={"url": spotify_url}, headers=headers, timeout=10)
-        if res.status_code not in [200, 201]: return None
-        slug = res.json().get('slug')
-        if not slug: return None
         
-        # 2. Resolve
-        res2 = requests.get(f"https://squigly.link/api/resolve/{slug}", headers=headers, timeout=10)
-        if res2.status_code != 200: return None
-        return res2.json().get('services', {}).get('apple', {}).get('url')
-    except: return None
+        next_data = soup.find('script', id='__NEXT_DATA__')
+        if not next_data: return None
+        
+        json_data = json.loads(next_data.string)
+        page_data = json_data.get('props', {}).get('pageProps', {}).get('pageData', {})
+        
+        raw_link = None
+        for section in page_data.get('sections', []):
+            if 'links' in section:
+                for link in section['links']:
+                    if link.get('platform') == 'appleMusic':
+                        raw_link = link.get('url')
+                        break
+            if raw_link: break
+            
+        return raw_link
+
+    except Exception as e: return None
 
 # =============================================================================
-# APPLE MUSIC SCRAPER
+# METHOD 2: TAPELINK.IO
+# =============================================================================
+def resolve_tapelink(spotify_url):
+    session = requests.Session()
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Content-Type': 'application/json',
+        'Origin': 'https://www.tapelink.io',
+        'Referer': 'https://www.tapelink.io/',
+        'Accept': '*/*'
+    }
+
+    try:
+        # Step 1: Generate Link
+        response = session.post("https://www.tapelink.io/api/generate-link", json={"url": spotify_url}, headers=headers, timeout=10)
+        if response.status_code != 200: return None
+        data = response.json()
+        
+        if not data.get('success'): return None
+            
+        share_link_stub = data.get('shareableLink')
+        if not share_link_stub: return None
+        
+        full_share_url = f"https://{share_link_stub}" if not share_link_stub.startswith("http") else share_link_stub
+
+        # Step 2: Scrape Data
+        page_response = session.get(full_share_url, headers=headers, timeout=10)
+        if page_response.status_code != 200: return None
+        
+        soup = BeautifulSoup(page_response.text, 'html.parser')
+        next_data_tag = soup.find('script', id='__NEXT_DATA__')
+        if not next_data_tag: return None
+        
+        json_data = json.loads(next_data_tag.string)
+        initial_data = json_data['props']['pageProps']['initialSongData']
+        platforms = initial_data.get('platforms', {})
+        return platforms.get('apple_music')
+
+    except Exception: return None
+
+# =============================================================================
+# METHOD 3: SQUIGLY.LINK
+# =============================================================================
+def resolve_squigly(spotify_url):
+    session = requests.Session()
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36',
+        'Referer': 'https://squigly.link/',
+        'Origin': 'https://squigly.link',
+        'Content-Type': 'application/json'
+    }
+
+    try:
+        # Step 1: Create Slug
+        response = session.post("https://squigly.link/api/create", json={"url": spotify_url}, headers=headers, timeout=10)
+        if response.status_code not in [200, 201]: return None
+        slug = response.json().get('slug')
+        if not slug: return None
+
+        # Step 2: Resolve Slug
+        resolve_url = f"https://squigly.link/api/resolve/{slug}"
+        response = session.get(resolve_url, headers=headers, timeout=10)
+        if response.status_code != 200: return None
+        
+        result_data = response.json()
+        return result_data.get('services', {}).get('apple', {}).get('url')
+
+    except Exception: return None
+
+# =============================================================================
+# APPLE MUSIC SCRAPER (Extended to find Date + Genres)
 # =============================================================================
 def scrape_apple_metadata(apple_url):
     if not apple_url: return None
     
-    # Clean URL
+    # Clean URL (Same logic as run_test.py, but applied centrally here)
     apple_url = apple_url.replace("geo.music.apple.com", "music.apple.com")
     apple_url = re.sub(r'\.com/[a-z]{2}/', '.com/us/', apple_url)
+    
+    # Ensure params are clean
+    try:
+        parsed = urlparse(apple_url)
+        query_params = parse_qs(parsed.query)
+        new_query = {}
+        if 'i' in query_params: new_query['i'] = query_params['i']
+        apple_url = urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, urlencode(new_query, doseq=True), parsed.fragment))
+    except: pass
     
     try:
         response = requests.get(apple_url, headers=get_headers(), timeout=10)
@@ -115,19 +191,13 @@ def scrape_apple_metadata(apple_url):
             try:
                 data = json.loads(match.strip())
                 
-                # We need datePublished and genre
-                # Depending on page type (Album vs Song), structure varies.
-                # Usually nested in 'audio' or 'inAlbum' or at root.
-                
-                # Flatten structure to find date
+                # --- DATE EXTRACTION ---
                 date_published = None
-                
-                # Try specific paths first
                 if 'datePublished' in data: date_published = data['datePublished']
                 elif 'audio' in data and 'datePublished' in data['audio']: date_published = data['audio']['datePublished']
                 elif 'inAlbum' in data and 'datePublished' in data['inAlbum']: date_published = data['inAlbum']['datePublished']
                 
-                # Extract genres
+                # --- GENRE EXTRACTION ---
                 raw_genres = find_key_recursive(data, "genre")
                 clean_genres = list(set([g for g in raw_genres if g.lower() != "music"]))
                 
@@ -148,26 +218,23 @@ def scrape_apple_metadata(apple_url):
 def process_track(spotify_id, isrc):
     spotify_url = f"https://open.spotify.com/track/{spotify_id}"
     
-    # 1. Get Links from all providers
     results = []
     
-    # We run them sequentially here, but could use threading for speed if needed.
-    # For a GitHub action running hourly, sequential is safer/easier to debug.
+    # 1. Fetch from all providers sequentially
     
     link1 = resolve_odesli(spotify_url)
     if link1: 
         meta = scrape_apple_metadata(link1)
         if meta: results.append(meta)
-        
-    # Sleep briefly to be polite
-    time.sleep(0.5) 
+    
+    time.sleep(random.uniform(0.5, 1.0)) # Polite delay
     
     link2 = resolve_tapelink(spotify_url)
     if link2 and (not link1 or link2 != link1):
         meta = scrape_apple_metadata(link2)
         if meta: results.append(meta)
 
-    time.sleep(0.5)
+    time.sleep(random.uniform(0.5, 1.0))
 
     link3 = resolve_squigly(spotify_url)
     if link3 and (not link1 or link3 != link1) and (not link2 or link3 != link2):
@@ -189,7 +256,7 @@ def process_track(spotify_id, isrc):
         'isrc': isrc,
         'track_id': spotify_id,
         'apple_music_genres': json.dumps(best_match['genres']),
-        'updated_at': int(time.time()) # Important to update timestamp so we don't query again immediately
+        'updated_at': int(time.time()) 
     }
 
 def run_job():
@@ -199,6 +266,7 @@ def run_job():
 
     print("--- 1. Fetching tracks missing Apple Genres ---")
     try:
+        # Fetch 30 tracks at a time
         res = requests.post(f"{WORKER_URL}/genres/find-missing-apple", json={"limit": 30}, timeout=30)
         res.raise_for_status()
         data = res.json()
@@ -215,25 +283,27 @@ def run_job():
     
     updates = []
     for t in tracks:
-        res = process_track(t['id'], t['isrc'])
-        if res:
-            updates.append(res)
-        else:
-            # If we fail to find data, we should still update 'updated_at' 
-            # or set genres to '[]' so we don't loop forever on unfindable tracks.
-            # Here we set empty array to mark as "checked".
-            updates.append({
-                'isrc': t['isrc'],
-                'track_id': t['id'],
-                'apple_music_genres': '[]',
-                'updated_at': int(time.time())
-            })
+        try:
+            res = process_track(t['id'], t['isrc'])
+            if res:
+                updates.append(res)
+            else:
+                # Mark as checked even if nothing found, to prevent infinite loops
+                updates.append({
+                    'isrc': t['isrc'],
+                    'track_id': t['id'],
+                    'apple_music_genres': '[]',
+                    'updated_at': int(time.time())
+                })
+        except Exception as e:
+            print(f"Error processing {t['id']}: {e}")
+            
         time.sleep(1) # Rate limit protection
 
     if updates:
         print(f"--- 2. Sending {len(updates)} updates to Turso ---")
         try:
-            # The worker now accepts payloads without duration_ms if apple_music_genres is present.
+            # Send to Worker (Duration validation is handled in Worker now)
             res = requests.post(f"{WORKER_URL}/genres", json=updates, timeout=30)
             if res.status_code == 200:
                 print("Success.")

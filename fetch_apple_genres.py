@@ -12,9 +12,12 @@ from bs4 import BeautifulSoup
 # =============================================================================
 WORKER_URL = os.environ.get("TURSO_WORKER_URL")
 
-# HOW MANY TRACKS TO PROCESS PER RUN
-# Set to 10 for testing. Set to 0 for production (defaults to 50).
 PROCESS_LIMIT = 10
+
+GENRES_TO_KEEP_WHOLE = [
+    "singer/songwriter",
+    "adult/contemporary"
+]
 
 USER_AGENTS = [
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
@@ -208,11 +211,9 @@ def scrape_apple_metadata(apple_url):
                 processed_genres = []
                 for g in raw_genres:
                     if isinstance(g, str):
-                        # EXCEPTION: Do NOT split "Singer/Songwriter"
-                        if "singer/songwriter" in g.lower():
+                        if g.lower() in GENRES_TO_KEEP_WHOLE:
                             processed_genres.append(g)
                         else:
-                            # Split other compound genres (e.g. "R&B/Soul" -> "R&B", "Soul")
                             parts = g.split('/')
                             for part in parts:
                                 p = part.strip()
@@ -310,7 +311,6 @@ def run_job():
             if res:
                 updates.append(res)
             else:
-                # Mark as checked to prevent infinite loops on unfindable tracks
                 updates.append({
                     'isrc': t['isrc'],
                     'track_id': t['id'],

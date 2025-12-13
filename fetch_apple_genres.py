@@ -12,7 +12,9 @@ from bs4 import BeautifulSoup
 # =============================================================================
 WORKER_URL = os.environ.get("TURSO_WORKER_URL")
 
-PROCESS_LIMIT = 10 
+# HOW MANY TRACKS TO PROCESS PER RUN
+# Set to 10 for testing. Set to 0 for production (defaults to 50).
+PROCESS_LIMIT = 10
 
 USER_AGENTS = [
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
@@ -202,7 +204,21 @@ def scrape_apple_metadata(apple_url):
                 
                 # --- GENRE EXTRACTION ---
                 raw_genres = find_key_recursive(data, "genre")
-                clean_genres = list(set([g for g in raw_genres if g.lower() != "music"]))
+                
+                processed_genres = []
+                for g in raw_genres:
+                    if isinstance(g, str):
+                        # EXCEPTION: Do NOT split "Singer/Songwriter"
+                        if "singer/songwriter" in g.lower():
+                            processed_genres.append(g)
+                        else:
+                            # Split other compound genres (e.g. "R&B/Soul" -> "R&B", "Soul")
+                            parts = g.split('/')
+                            for part in parts:
+                                p = part.strip()
+                                if p: processed_genres.append(p)
+
+                clean_genres = list(set([g for g in processed_genres if g.lower() != "music"]))
                 
                 if not clean_genres: continue 
                 
@@ -309,6 +325,7 @@ def run_job():
     if updates:
         print(f"--- 2. Sending {len(updates)} updates to Turso ---")
         try:
+            # Send to Worker (Duration validation is handled in Worker now)
             res = requests.post(f"{WORKER_URL}/genres", json=updates, timeout=30)
             if res.status_code == 200:
                 print("Success.")

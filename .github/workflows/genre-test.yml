@@ -1,10 +1,7 @@
 name: Test Apple Genre Fetchers
 
 on:
-  workflow_dispatch: # Allows you to run it manually from the Actions tab
-  push:
-    paths:
-      - 'run_test.py'
+  workflow_dispatch:
 
 jobs:
   test-fetching:

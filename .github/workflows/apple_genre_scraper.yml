@@ -1,12 +1,14 @@
 name: Apple Music Genre Scraper
 
 on:
+  schedule:
+    - cron: '0 * * * *'
   workflow_dispatch:
 
 jobs:
   scrape-apple-genres:
     runs-on: ubuntu-latest
-    timeout-minutes: 330
+    timeout-minutes: 60
 
     steps:
     - name: Checkout code

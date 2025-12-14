@@ -4,15 +4,19 @@ import json
 import re
 import time
 import random
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 from bs4 import BeautifulSoup
+
+class RateLimitException(Exception):
+    pass
 
 # =============================================================================
 # CONFIGURATION
 # =============================================================================
 WORKER_URL = os.environ.get("TURSO_WORKER_URL")
 
-PROCESS_LIMIT = 1000
+PROCESS_LIMIT = 10
 
 START_TIME = time.time()
 MAX_RUNTIME_SECONDS = 5 * 60 * 60 + 15 * 60
@@ -61,7 +65,7 @@ def resolve_odesli(spotify_url):
     # 1. Resolve ID via API
     try:
         res = session.get("https://api.odesli.co/resolve", params={'url': spotify_url}, headers=get_headers(), timeout=10)
-        if res.status_code == 429: return None # Rate Limit
+        if res.status_code == 429: raise RateLimitException("Odesli")
         if res.status_code != 200: return None
         
         data = res.json()
@@ -73,6 +77,7 @@ def resolve_odesli(spotify_url):
         if 'appleMusic' in links:
             return links['appleMusic'].get('url')
             
+    except RateLimitException: raise
     except Exception as e: return None
 
     # 2. Get Page Data (Scraping Fallback)
@@ -81,6 +86,8 @@ def resolve_odesli(spotify_url):
     slug = 's' if entity_type == 'song' else 'a'
     try:
         page = session.get(f"https://song.link/{slug}/{entity_id}", headers=get_headers(), timeout=10)
+        if page.status_code == 429: raise RateLimitException("Odesli Page")
+        
         soup = BeautifulSoup(page.text, 'html.parser')
         
         next_data = soup.find('script', id='__NEXT_DATA__')
@@ -100,6 +107,7 @@ def resolve_odesli(spotify_url):
             
         return raw_link
 
+    except RateLimitException: raise
     except Exception as e: return None
 
 # =============================================================================
@@ -118,6 +126,7 @@ def resolve_tapelink(spotify_url):
     try:
         # Step 1: Generate Link
         response = session.post("https://www.tapelink.io/api/generate-link", json={"url": spotify_url}, headers=headers, timeout=10)
+        if response.status_code == 429: raise RateLimitException("Tapelink")
         if response.status_code != 200: return None
         data = response.json()
         
@@ -130,6 +139,7 @@ def resolve_tapelink(spotify_url):
 
         # Step 2: Scrape Data
         page_response = session.get(full_share_url, headers=headers, timeout=10)
+        if page_response.status_code == 429: raise RateLimitException("Tapelink Page")
         if page_response.status_code != 200: return None
         
         soup = BeautifulSoup(page_response.text, 'html.parser')
@@ -141,6 +151,7 @@ def resolve_tapelink(spotify_url):
         platforms = initial_data.get('platforms', {})
         return platforms.get('apple_music')
 
+    except RateLimitException: raise
     except Exception: return None
 
 # =============================================================================
@@ -158,6 +169,7 @@ def resolve_squigly(spotify_url):
     try:
         # Step 1: Create Slug
         response = session.post("https://squigly.link/api/create", json={"url": spotify_url}, headers=headers, timeout=10)
+        if response.status_code == 429: raise RateLimitException("Squigly")
         if response.status_code not in [200, 201]: return None
         slug = response.json().get('slug')
         if not slug: return None
@@ -165,13 +177,15 @@ def resolve_squigly(spotify_url):
         # Step 2: Resolve Slug
         resolve_url = f"https://squigly.link/api/resolve/{slug}"
         response = session.get(resolve_url, headers=headers, timeout=10)
+        if response.status_code == 429: raise RateLimitException("Squigly Resolve")
         if response.status_code != 200: return None
         
         result_data = response.json()
         return result_data.get('services', {}).get('apple', {}).get('url')
 
+    except RateLimitException: raise
     except Exception: return None
-
+    
 # =============================================================================
 # APPLE MUSIC SCRAPER (Extended to find Date + Genres)
 # =============================================================================
@@ -248,46 +262,64 @@ def scrape_apple_metadata(apple_url):
 def process_track(spotify_id, isrc):
     spotify_url = f"https://open.spotify.com/track/{spotify_id}"
     
-    results = []
-    
-    # 1. Fetch from all providers sequentially
-    link1 = resolve_odesli(spotify_url)
-    if link1: 
-        meta = scrape_apple_metadata(link1)
-        if meta: results.append(meta)
-    
-    time.sleep(random.uniform(0.5, 1.0)) # Polite delay
-    
-    link2 = resolve_tapelink(spotify_url)
-    if link2 and (not link1 or link2 != link1):
-        meta = scrape_apple_metadata(link2)
-        if meta: results.append(meta)
-
-    time.sleep(random.uniform(0.5, 1.0))
-
-    link3 = resolve_squigly(spotify_url)
-    if link3 and (not link1 or link3 != link1) and (not link2 or link3 != link2):
-        meta = scrape_apple_metadata(link3)
-        if meta: results.append(meta)
-        
-    if not results:
-        print(f"   [SKIP] No Apple data found for {spotify_id}", flush=True)
+    # Wrapper to catch rate limits from threads
+    def check_provider(resolver_func):
+        try:
+            link = resolver_func(spotify_url)
+            if link:
+                return scrape_apple_metadata(link)
+        except RateLimitException:
+            raise 
+        except Exception:
+            pass
         return None
-        
-    # 2. Sort by Date (Oldest Wins)
-    # If date is missing (None), treat as '9999-99-99' (put at end)
-    results.sort(key=lambda x: x['date'] if x['date'] else '9999-99-99')
-    
-    best_match = results[0]
-    print(f"   [FOUND] {spotify_id} -> {best_match['date']} | Genres: {best_match['genres']}", flush=True)
-    
-    return {
-        'isrc': isrc,
-        'track_id': spotify_id,
-        'apple_music_genres': json.dumps(best_match['genres']),
-        'updated_at': int(time.time()) 
-    }
 
+    while True: # Retry loop for 429s
+        start_ts = time.time()
+        results = []
+        rate_limited_provider = None
+
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            future_to_provider = {
+                executor.submit(check_provider, resolve_odesli): "Odesli",
+                executor.submit(check_provider, resolve_tapelink): "Tapelink",
+                executor.submit(check_provider, resolve_squigly): "Squigly"
+            }
+            
+            for future in as_completed(future_to_provider):
+                try:
+                    data = future.result()
+                    if data: results.append(data)
+                except RateLimitException:
+                    rate_limited_provider = future_to_provider[future]
+                except Exception: 
+                    pass
+        
+        # If any provider hit a rate limit, pause and retry the whole track
+        if rate_limited_provider:
+            print(f"   [429] Rate Limit hit on {rate_limited_provider}. Pausing 5 minutes...", flush=True)
+            time.sleep(5 * 60)
+            continue 
+
+        # If we are here, no rate limits occurred
+        elapsed = time.time() - start_ts
+        
+        if not results:
+            print(f"   [SKIP] No Apple data found for {spotify_id} ({elapsed:.2f}s)", flush=True)
+            return None
+            
+        results.sort(key=lambda x: x['date'] if x['date'] else '9999-99-99')
+        best_match = results[0]
+        
+        print(f"   [FOUND] {spotify_id} -> {best_match['date']} | Genres: {best_match['genres']} ({elapsed:.2f}s)", flush=True)
+        
+        return {
+            'isrc': isrc,
+            'track_id': spotify_id,
+            'apple_music_genres': json.dumps(best_match['genres']),
+            'updated_at': int(time.time()) 
+        }
+    
 BATCH_SIZE = 250
 
 def send_updates_to_turso(updates):
@@ -357,8 +389,6 @@ def run_job():
                 })
         except Exception as e:
             print(f"Error processing {t['id']}: {e}", flush=True)
-
-        time.sleep(1)  # Rate limit protection
 
         # Send batch every BATCH_SIZE tracks
         if len(updates) >= BATCH_SIZE:

@@ -16,7 +16,7 @@ class RateLimitException(Exception):
 # =============================================================================
 WORKER_URL = os.environ.get("TURSO_WORKER_URL")
 
-PROCESS_LIMIT = 1000
+PROCESS_LIMIT = 10
 
 START_TIME = time.time()
 MAX_RUNTIME_SECONDS = 5 * 60 * 60 + 15 * 60
@@ -297,8 +297,8 @@ def process_track(spotify_id, isrc):
         
         # If any provider hit a rate limit, pause and retry the whole track
         if rate_limited_provider:
-            print(f"   [429] Rate Limit hit on {rate_limited_provider}. Pausing 5 minutes...", flush=True)
-            time.sleep(5 * 60)
+            print(f"   [429] Rate Limit hit on {rate_limited_provider}. Pausing 2 minutes...", flush=True)
+            time.sleep(2 * 60)
             continue 
 
         # If we are here, no rate limits occurred

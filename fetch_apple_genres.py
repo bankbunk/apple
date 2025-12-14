@@ -18,6 +18,12 @@ WORKER_URL = os.environ.get("TURSO_WORKER_URL")
 
 PROCESS_LIMIT = 10
 
+PROVIDER_CONFIG = {
+    "Odesli": True,
+    "Tapelink": True,
+    "Squigly": False
+}
+
 START_TIME = time.time()
 MAX_RUNTIME_SECONDS = 5 * 60 * 60 + 15 * 60
 
@@ -280,11 +286,13 @@ def process_track(spotify_id, isrc):
         rate_limited_provider = None
 
         with ThreadPoolExecutor(max_workers=3) as executor:
-            future_to_provider = {
-                executor.submit(check_provider, resolve_odesli): "Odesli",
-                executor.submit(check_provider, resolve_tapelink): "Tapelink",
-                executor.submit(check_provider, resolve_squigly): "Squigly"
-            }
+            future_to_provider = {}
+            if PROVIDER_CONFIG["Odesli"]:
+                future_to_provider[executor.submit(check_provider, resolve_odesli)] = "Odesli"
+            if PROVIDER_CONFIG["Tapelink"]:
+                future_to_provider[executor.submit(check_provider, resolve_tapelink)] = "Tapelink"
+            if PROVIDER_CONFIG["Squigly"]:
+                future_to_provider[executor.submit(check_provider, resolve_squigly)] = "Squigly"
             
             for future in as_completed(future_to_provider):
                 try:

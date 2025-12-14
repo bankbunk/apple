@@ -6,7 +6,8 @@ on:
 jobs:
   scrape-apple-genres:
     runs-on: ubuntu-latest
-    
+    timeout-minutes: 330
+
     steps:
     - name: Checkout code
       uses: actions/checkout@v3
@@ -23,4 +24,5 @@ jobs:
     - name: Run Scraper
       env:
         TURSO_WORKER_URL: ${{ secrets.TURSO_WORKER_URL }}
-      run: python fetch_apple_genres.py
+        PYTHONUNBUFFERED: 1
+      run: python -u fetch_apple_genres.py

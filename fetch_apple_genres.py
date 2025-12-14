@@ -283,7 +283,12 @@ def resolve_squigly(spotify_url):
             print(f"      [Squigly] Create returned {response.status_code}", flush=True)
             return None
         
-        slug = response.json().get('slug')
+        data = response.json()
+        if not data:
+            print(f"      [Squigly] Create returned empty response", flush=True)
+            return None
+            
+        slug = data.get('slug')
         if not slug:
             print(f"      [Squigly] No slug in response", flush=True)
             return None
@@ -300,12 +305,25 @@ def resolve_squigly(spotify_url):
             return None
 
         result_data = response.json()
-        apple_url = result_data.get('services', {}).get('apple', {}).get('url')
+        if not result_data:
+            print(f"      [Squigly] Resolve returned empty response", flush=True)
+            return None
         
+        services = result_data.get('services')
+        if not services:
+            print(f"      [Squigly] No services in response", flush=True)
+            return None
+            
+        apple_data = services.get('apple')
+        if not apple_data:
+            print(f"      [Squigly] No Apple in services", flush=True)
+            return None
+            
+        apple_url = apple_data.get('url')
         if apple_url:
             print(f"      [Squigly] Found Apple link", flush=True)
         else:
-            print(f"      [Squigly] No Apple in services", flush=True)
+            print(f"      [Squigly] Apple data has no URL", flush=True)
             
         return apple_url
 
@@ -314,7 +332,7 @@ def resolve_squigly(spotify_url):
     except Exception as e:
         print(f"      [Squigly] Error: {e}", flush=True)
         return None
-
+    
 # =============================================================================
 # APPLE MUSIC SCRAPER (Extended to find Date + Genres)
 # =============================================================================

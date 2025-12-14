@@ -16,7 +16,7 @@ class RateLimitException(Exception):
 # =============================================================================
 WORKER_URL = os.environ.get("TURSO_WORKER_URL")
 
-PROCESS_LIMIT = 10
+PROCESS_LIMIT = 1000
 
 PROVIDER_CONFIG = {
     "Odesli": True,

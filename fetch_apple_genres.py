@@ -78,7 +78,7 @@ def resolve_odesli(spotify_url):
             return links['appleMusic'].get('url')
             
     except RateLimitException: raise
-    except Exception as e: return None
+    except Exception: return None
 
     # 2. Get Page Data (Scraping Fallback)
     if not entity_id or not entity_type: return None
@@ -108,7 +108,7 @@ def resolve_odesli(spotify_url):
         return raw_link
 
     except RateLimitException: raise
-    except Exception as e: return None
+    except Exception: return None
 
 # =============================================================================
 # METHOD 2: TAPELINK.IO

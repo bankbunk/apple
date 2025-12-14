@@ -271,7 +271,7 @@ def process_track(spotify_id, isrc):
         if meta: results.append(meta)
         
     if not results:
-        print(f"   [SKIP] No Apple data found for {spotify_id}")
+        print(f"   [SKIP] No Apple data found for {spotify_id}", flush=True)
         return None
         
     # 2. Sort by Date (Oldest Wins)
@@ -279,7 +279,7 @@ def process_track(spotify_id, isrc):
     results.sort(key=lambda x: x['date'] if x['date'] else '9999-99-99')
     
     best_match = results[0]
-    print(f"   [FOUND] {spotify_id} -> {best_match['date']} | Genres: {best_match['genres']}")
+    print(f"   [FOUND] {spotify_id} -> {best_match['date']} | Genres: {best_match['genres']}", flush=True)
     
     return {
         'isrc': isrc,

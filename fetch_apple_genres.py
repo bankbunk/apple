@@ -328,7 +328,7 @@ def process_track(spotify_id, isrc):
             'updated_at': int(time.time()) 
         }
     
-BATCH_SIZE = 250
+BATCH_SIZE = 100
 
 def send_updates_to_turso(updates):
     """Send a batch of updates to Turso"""

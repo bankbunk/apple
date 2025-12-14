@@ -207,6 +207,13 @@ def scrape_apple_metadata(apple_url):
                 if 'datePublished' in data: date_published = data['datePublished']
                 elif 'audio' in data and 'datePublished' in data['audio']: date_published = data['audio']['datePublished']
                 elif 'inAlbum' in data and 'datePublished' in data['inAlbum']: date_published = data['inAlbum']['datePublished']
+
+                # Normalize date format (handle YYYY or YYYY-MM)
+                if date_published:
+                    if len(date_published) == 4:
+                        date_published = f"{date_published}-12-31"
+                    elif len(date_published) == 7:
+                        date_published = f"{date_published}-28"
                 
                 # --- GENRE EXTRACTION ---
                 raw_genres = find_key_recursive(data, "genre")
@@ -281,34 +288,57 @@ def process_track(spotify_id, isrc):
         'updated_at': int(time.time()) 
     }
 
+BATCH_SIZE = 250
+
+def send_updates_to_turso(updates):
+    """Send a batch of updates to Turso"""
+    if not updates:
+        return True
+    
+    print(f"--- Sending batch of {len(updates)} updates to Turso ---", flush=True)
+    try:
+        res = requests.post(f"{WORKER_URL}/genres", json=updates, timeout=30)
+        if res.status_code == 200:
+            print(f"Batch sent successfully.", flush=True)
+            return True
+        else:
+            print(f"Batch failed: {res.text}", flush=True)
+            return False
+    except Exception as e:
+        print(f"Error sending batch: {e}", flush=True)
+        return False
+
 def run_job():
     if not WORKER_URL:
-        print("Error: TURSO_WORKER_URL secret is missing.")
+        print("Error: TURSO_WORKER_URL secret is missing.", flush=True)
         return
 
     # Determine limit
     limit = PROCESS_LIMIT
     if limit == 0:
-        limit = 50 # Production safety limit
-    
-    print(f"--- 1. Fetching tracks missing Apple Genres (Limit: {limit}) ---")
+        limit = 50  # Production safety limit
+
+    print(f"--- 1. Fetching tracks missing Apple Genres (Limit: {limit}) ---", flush=True)
     try:
         res = requests.post(f"{WORKER_URL}/genres/find-missing-apple", json={"limit": limit}, timeout=30)
         res.raise_for_status()
         data = res.json()
         tracks = data.get('tracks', [])
     except Exception as e:
-        print(f"Failed to fetch job: {e}")
+        print(f"Failed to fetch job: {e}", flush=True)
         return
 
     if not tracks:
-        print("No tracks need updating.")
+        print("No tracks need updating.", flush=True)
         return
 
-    print(f"Processing {len(tracks)} tracks...")
-    
+    print(f"Processing {len(tracks)} tracks...", flush=True)
+
     updates = []
-    for t in tracks:
+    total_sent = 0
+
+    for i, t in enumerate(tracks):
+        # Check time limit before each track
         elapsed = time.time() - START_TIME
         if elapsed >= MAX_RUNTIME_SECONDS:
             print(f"--- TIME LIMIT REACHED ({elapsed/3600:.2f}h) - Stopping gracefully ---", flush=True)
@@ -326,21 +356,26 @@ def run_job():
                     'updated_at': int(time.time())
                 })
         except Exception as e:
-            print(f"Error processing {t['id']}: {e}")
-            
-        time.sleep(1) # Rate limit protection
+            print(f"Error processing {t['id']}: {e}", flush=True)
 
-    if updates:
-        print(f"--- 2. Sending {len(updates)} updates to Turso ---")
-        try:
-            # Send to Worker (Duration validation is handled in Worker now)
-            res = requests.post(f"{WORKER_URL}/genres", json=updates, timeout=30)
-            if res.status_code == 200:
-                print("Success.")
+        time.sleep(1)  # Rate limit protection
+
+        # Send batch every BATCH_SIZE tracks
+        if len(updates) >= BATCH_SIZE:
+            print(f"--- Reached {BATCH_SIZE} tracks (Total processed: {i + 1}/{len(tracks)}) ---", flush=True)
+            if send_updates_to_turso(updates):
+                total_sent += len(updates)
+                updates = []  # Clear for next batch
             else:
-                print(f"Update failed: {res.text}")
-        except Exception as e:
-            print(f"Error sending updates: {e}")
+                print("Batch failed, will retry with next batch", flush=True)
+
+    # Send remaining updates
+    if updates:
+        print(f"--- 2. Sending final batch of {len(updates)} updates to Turso ---", flush=True)
+        if send_updates_to_turso(updates):
+            total_sent += len(updates)
+
+    print(f"--- DONE: Total {total_sent} tracks sent to Turso ---", flush=True)
 
 if __name__ == "__main__":
     run_job()

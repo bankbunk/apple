@@ -72,7 +72,9 @@ def resolve_odesli(spotify_url):
     try:
         res = session.get("https://api.odesli.co/resolve", params={'url': spotify_url}, headers=get_headers(), timeout=10)
         if res.status_code == 429: raise RateLimitException("Odesli")
-        if res.status_code != 200: return None
+        if res.status_code != 200: 
+            print(f"   [Odesli] API returned {res.status_code}", flush=True)
+            return None
         
         data = res.json()
         entity_id = data.get('id')
@@ -84,7 +86,9 @@ def resolve_odesli(spotify_url):
             return links['appleMusic'].get('url')
             
     except RateLimitException: raise
-    except Exception: return None
+    except Exception as e: 
+        print(f"   [Odesli] API Error: {e}", flush=True)
+        return None
 
     # 2. Get Page Data (Scraping Fallback)
     if not entity_id or not entity_type: return None
@@ -97,7 +101,9 @@ def resolve_odesli(spotify_url):
         soup = BeautifulSoup(page.text, 'html.parser')
         
         next_data = soup.find('script', id='__NEXT_DATA__')
-        if not next_data: return None
+        if not next_data: 
+            print(f"   [Odesli] No NEXT_DATA found on page", flush=True)
+            return None
         
         json_data = json.loads(next_data.string)
         page_data = json_data.get('props', {}).get('pageProps', {}).get('pageData', {})
@@ -114,8 +120,10 @@ def resolve_odesli(spotify_url):
         return raw_link
 
     except RateLimitException: raise
-    except Exception: return None
-
+    except Exception as e: 
+        print(f"   [Odesli] Page Scrape Error: {e}", flush=True)
+        return None
+    
 # =============================================================================
 # METHOD 2: TAPELINK.IO
 # =============================================================================
@@ -133,7 +141,9 @@ def resolve_tapelink(spotify_url):
         # Step 1: Generate Link
         response = session.post("https://www.tapelink.io/api/generate-link", json={"url": spotify_url}, headers=headers, timeout=10)
         if response.status_code == 429: raise RateLimitException("Tapelink")
-        if response.status_code != 200: return None
+        if response.status_code != 200: 
+            print(f"   [Tapelink] API returned {response.status_code}", flush=True)
+            return None
         data = response.json()
         
         if not data.get('success'): return None
@@ -158,7 +168,9 @@ def resolve_tapelink(spotify_url):
         return platforms.get('apple_music')
 
     except RateLimitException: raise
-    except Exception: return None
+    except Exception as e:
+        print(f"   [Tapelink] Error: {e}", flush=True)
+        return None
 
 # =============================================================================
 # METHOD 3: SQUIGLY.LINK
@@ -213,10 +225,16 @@ def scrape_apple_metadata(apple_url):
     
     try:
         response = requests.get(apple_url, headers=get_headers(), timeout=10)
-        if response.status_code != 200: return None
+        if response.status_code != 200:
+            print(f"   [Apple] HTTP {response.status_code} for {apple_url}", flush=True)
+            return None
         
         jsonld_pattern = r'<script[^>]*type="application/ld\+json"[^>]*>(.*?)</script>'
         matches = re.findall(jsonld_pattern, response.text, re.DOTALL)
+        
+        if not matches:
+            print(f"   [Apple] No JSON-LD found on {apple_url}", flush=True)
+            return None
         
         for match in matches:
             try:
@@ -258,10 +276,13 @@ def scrape_apple_metadata(apple_url):
                     'date': date_published, # Format YYYY-MM-DD
                     'genres': clean_genres
                 }
-            except: continue
+            except Exception as e:
+                print(f"   [Apple] JSON Parse Error: {e}", flush=True)
+                continue
         return None
-    except: return None
-
+    except Exception as e:
+        print(f"   [Apple] Request Failed: {e}", flush=True)
+        return None
 # =============================================================================
 # MAIN LOGIC
 # =============================================================================
@@ -276,8 +297,8 @@ def process_track(spotify_id, isrc):
                 return scrape_apple_metadata(link)
         except RateLimitException:
             raise 
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"   [Provider Error] {resolver_func.__name__}: {e}", flush=True)
         return None
 
     while True: # Retry loop for 429s

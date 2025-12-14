@@ -14,6 +14,9 @@ WORKER_URL = os.environ.get("TURSO_WORKER_URL")
 
 PROCESS_LIMIT = 10
 
+START_TIME = time.time()
+MAX_RUNTIME_SECONDS = 5 * 60 * 60 + 15 * 60
+
 GENRES_TO_KEEP_WHOLE = [
     "singer/songwriter",
     "adult/contemporary"
@@ -306,6 +309,11 @@ def run_job():
     
     updates = []
     for t in tracks:
+        elapsed = time.time() - START_TIME
+        if elapsed >= MAX_RUNTIME_SECONDS:
+            print(f"--- TIME LIMIT REACHED ({elapsed/3600:.2f}h) - Stopping gracefully ---", flush=True)
+            break
+
         try:
             res = process_track(t['id'], t['isrc'])
             if res:

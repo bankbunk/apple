@@ -12,7 +12,7 @@ from bs4 import BeautifulSoup
 # =============================================================================
 WORKER_URL = os.environ.get("TURSO_WORKER_URL")
 
-PROCESS_LIMIT = 10
+PROCESS_LIMIT = 1000
 
 START_TIME = time.time()
 MAX_RUNTIME_SECONDS = 5 * 60 * 60 + 15 * 60

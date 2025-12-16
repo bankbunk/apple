@@ -23,7 +23,7 @@ WORKER_URL = os.environ.get("TURSO_WORKER_URL")
 PROCESS_LIMIT = 0
 
 START_TIME = time.time()
-MAX_RUNTIME_SECONDS = 59 * 60
+MAX_RUNTIME_SECONDS = 60 * 60
 
 GENRES_TO_KEEP_WHOLE = [
     "singer/songwriter",

@@ -23,7 +23,7 @@ WORKER_URL = os.environ.get("TURSO_WORKER_URL")
 PROCESS_LIMIT = 0
 
 START_TIME = time.time()
-MAX_RUNTIME_SECONDS = 60 * 60
+MAX_RUNTIME_SECONDS = 55 * 60
 
 GENRES_TO_KEEP_WHOLE = [
     "singer/songwriter",
@@ -505,7 +505,7 @@ def process_track(spotify_id, isrc):
                 'isrc': isrc,
                 'track_id': spotify_id,
                 'apple_music_genres': json.dumps(best_match['genres']),
-                'updated_at': int(time.time())
+                'updated_at': int(time.time() / 86400)
             }
 
         # If providers rate limited, wait and retry
@@ -597,7 +597,7 @@ def run_job():
                         'isrc': t['isrc'],
                         'track_id': t['id'],
                         'apple_music_genres': '[]',
-                        'updated_at': int(time.time())
+                        'updated_at': int(time.time() / 86400)
                     })
             except Exception as e:
                 print(f"Error processing {t['id']}: {e}", flush=True)

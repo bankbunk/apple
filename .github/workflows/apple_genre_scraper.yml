@@ -8,7 +8,7 @@ on:
 jobs:
   scrape-apple-genres:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 65
 
     steps:
     - name: Checkout code

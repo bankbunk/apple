@@ -39,12 +39,13 @@ GENRES_TO_KEEP_WHOLE = [
 SQUIGLY_COOLDOWN_UNTIL = 0
 ODESLI_COOLDOWN_UNTIL = 0
 SONGLINK_COOLDOWN_UNTIL = 0
+LAST_SQUIGLY_REQUEST_TIME = 0
 
 # Minimum time each track processing must take (smart delay)
 MIN_TRACK_DURATION = 2  # seconds
 
 # Add delay between tracks to avoid rate limits
-REQUEST_DELAY = 0.5  # seconds between tracks
+REQUEST_DELAY = 1
 
 USER_AGENTS = [
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
@@ -223,13 +224,24 @@ def resolve_songlink_api(spotify_url):
 # METHOD 3: SQUIGLY.LINK
 # =============================================================================
 def resolve_squigly(spotify_url):
-    global SQUIGLY_COOLDOWN_UNTIL
-    
-    # Check cooldown
+    global SQUIGLY_COOLDOWN_UNTIL, LAST_SQUIGLY_REQUEST_TIME
+
+    # Check cooldown (Rate Limit 429 penalty)
     if time.time() < SQUIGLY_COOLDOWN_UNTIL:
         print(f"      [Squigly] On cooldown, skipping", flush=True)
         return None
-    
+
+    # Check Interval (Throttling between requests)
+    # Ensure at least 10 seconds have passed since the last Squigly attempt
+    time_since_last = time.time() - LAST_SQUIGLY_REQUEST_TIME
+    if time_since_last < 10:
+        sleep_needed = 10 - time_since_last
+        # print(f"      [Squigly] Throttling: sleeping {sleep_needed:.2f}s...", flush=True)
+        time.sleep(sleep_needed)
+
+    # Update timestamp immediately before making the request
+    LAST_SQUIGLY_REQUEST_TIME = time.time()
+
     session = requests.Session()
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36',
@@ -241,19 +253,19 @@ def resolve_squigly(spotify_url):
     try:
         # Step 1: Create Slug
         response = session.post("https://squigly.link/api/create", json={"url": spotify_url}, headers=headers, timeout=10)
-        
-        if response.status_code == 429: 
+
+        if response.status_code == 429:
             raise RateLimitException("Squigly")
-        
+
         if response.status_code not in [200, 201]:
             print(f"      [Squigly] Create returned {response.status_code}", flush=True)
             return None
-        
+
         data = response.json()
         if not data:
             print(f"      [Squigly] Create returned empty response", flush=True)
             return None
-            
+
         slug = data.get('slug')
         if not slug:
             print(f"      [Squigly] No slug in response", flush=True)
@@ -262,10 +274,10 @@ def resolve_squigly(spotify_url):
         # Step 2: Resolve Slug
         resolve_url = f"https://squigly.link/api/resolve/{slug}"
         response = session.get(resolve_url, headers=headers, timeout=10)
-        
-        if response.status_code == 429: 
+
+        if response.status_code == 429:
             raise RateLimitException("Squigly Resolve")
-        
+
         if response.status_code != 200:
             print(f"      [Squigly] Resolve returned {response.status_code}", flush=True)
             return None
@@ -274,26 +286,26 @@ def resolve_squigly(spotify_url):
         if not result_data:
             print(f"      [Squigly] Resolve returned empty response", flush=True)
             return None
-        
+
         services = result_data.get('services')
         if not services:
             print(f"      [Squigly] No services in response", flush=True)
             return None
-            
+
         apple_data = services.get('apple')
         if not apple_data:
             print(f"      [Squigly] No Apple in services", flush=True)
             return None
-            
+
         apple_url = apple_data.get('url')
         if apple_url:
             print(f"      [Squigly] Found Apple link", flush=True)
         else:
             print(f"      [Squigly] Apple data has no URL", flush=True)
-            
+
         return apple_url
 
-    except RateLimitException: 
+    except RateLimitException:
         raise
     except Exception as e:
         print(f"      [Squigly] Error: {e}", flush=True)
@@ -428,10 +440,10 @@ def process_track(spotify_id, isrc):
         apple_url = None
         try:
             apple_url = resolver_func(spotify_url)
-            
+
         except (RateLimitException, SoftRateLimitException):
             print(f"      [429] {provider_name} failed. Marking cooldown & switching.", flush=True)
-            
+
             # Set Cooldown
             if provider_name == "Odesli":
                 ODESLI_COOLDOWN_UNTIL = time.time() + 120
@@ -439,13 +451,25 @@ def process_track(spotify_id, isrc):
             else:
                 SONGLINK_COOLDOWN_UNTIL = time.time() + 120
                 CURRENT_PRIMARY_PROVIDER = "Odesli" # Switch for next retry
-            
+
             retry_count += 1
             continue # Loop again immediately to try the OTHER provider
 
         except Exception as e:
             print(f"      [{provider_name}] Error: {e}", flush=True)
             # Generic error, maybe try squigly?
+
+        # 4b. SECONDARY CHECK (If Odesli failed silently, try SongLink API)
+        if not apple_url and provider_name == "Odesli":
+            if time.time() > SONGLINK_COOLDOWN_UNTIL:
+                print(f"      [Fallback] Odesli yielded nothing, trying SongLink API...", flush=True)
+                try:
+                    apple_url = resolve_songlink_api(spotify_url)
+                except (RateLimitException, SoftRateLimitException):
+                    print(f"      [429] SongLink API rate limited during fallback.", flush=True)
+                    SONGLINK_COOLDOWN_UNTIL = time.time() + 120
+                except Exception as e:
+                    print(f"      [SongLink] Fallback Error: {e}", flush=True)
 
         # 5. PROCESS RESULT OR FALLBACK
         final_meta = None
@@ -482,7 +506,9 @@ def process_track(spotify_id, isrc):
         # Since we didn't hit a `continue` (Rate Limit), we assume legitimate "Not Found".
         break
 
-    print(f"   [SKIP] No Apple data found for {spotify_id}", flush=True)
+    # If we reached here, no data found this attempt.
+    elapsed = time.time() - start_ts
+    print(f"   [SKIP] No Apple data found for {spotify_id} ({elapsed:.2f}s)", flush=True)
     return None
 
 BATCH_SIZE = 100

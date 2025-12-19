@@ -20,6 +20,10 @@ class SoftRateLimitException(Exception):
 # =============================================================================
 WORKER_URL = os.environ.get("TURSO_WORKER_URL")
 
+# Defaults to 0/1 (no sharding)
+WORKER_INDEX = int(os.environ.get("WORKER_INDEX", 0))
+TOTAL_WORKERS = int(os.environ.get("TOTAL_WORKERS", 1))
+
 PROCESS_LIMIT = 0
 
 START_TIME = time.time()
@@ -522,7 +526,7 @@ def run_job():
 
     continuous_mode = (PROCESS_LIMIT == 0)
 
-    print(f"--- Starting Job (Continuous: {continuous_mode}, Max Runtime: {MAX_RUNTIME_SECONDS}s) ---", flush=True)
+    print(f"--- Starting Job (Worker {WORKER_INDEX}/{TOTAL_WORKERS} | Continuous: {continuous_mode}) ---", flush=True)
 
     while (time.time() - START_TIME) < MAX_RUNTIME_SECONDS:
         current_limit = 50 if continuous_mode else PROCESS_LIMIT
@@ -530,7 +534,13 @@ def run_job():
         print(f"--- 1. Fetching tracks (Limit: {current_limit}) ---", flush=True)
 
         try:
-            res = requests.post(f"{WORKER_URL}/genres/find-missing-apple", json={"limit": current_limit}, timeout=30)
+            # --- EDITED: Pass sharding params to API ---
+            payload = {
+                "limit": current_limit,
+                "worker_index": WORKER_INDEX,
+                "total_workers": TOTAL_WORKERS
+            }
+            res = requests.post(f"{WORKER_URL}/genres/find-missing-apple", json=payload, timeout=30)
             res.raise_for_status()
             data = res.json()
             tracks = data.get('tracks', [])

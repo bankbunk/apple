@@ -5,7 +5,7 @@ import re
 import time
 import random
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
+from urllib.parse import urlparse, parse_qs, urlencode, urlunparse, quote
 from bs4 import BeautifulSoup
 
 class RateLimitException(Exception):
@@ -32,7 +32,7 @@ GENRES_TO_KEEP_WHOLE = [
 
 SQUIGLY_COOLDOWN_UNTIL = 0
 ODESLI_COOLDOWN_UNTIL = 0
-TAPELINK_COOLDOWN_UNTIL = 0
+SONGLINK_COOLDOWN_UNTIL = 0  # Renamed from TAPELINK
 
 # Add delay between tracks to avoid rate limits
 REQUEST_DELAY = 0.5  # seconds between tracks
@@ -166,91 +166,48 @@ def resolve_odesli(spotify_url):
         return None
 
 # =============================================================================
-# METHOD 2: TAPELINK.IO
+# METHOD 2: SONGLINK API (Replaces Tapelink)
 # =============================================================================
-def resolve_tapelink(spotify_url):
-    global TAPELINK_COOLDOWN_UNTIL
+def resolve_songlink_api(spotify_url):
+    global SONGLINK_COOLDOWN_UNTIL
     
     # Check cooldown
-    if time.time() < TAPELINK_COOLDOWN_UNTIL:
-        print(f"      [Tapelink] On cooldown, skipping", flush=True)
+    if time.time() < SONGLINK_COOLDOWN_UNTIL:
+        print(f"      [SongLink] On cooldown, skipping", flush=True)
         return None
     
-    session = requests.Session()
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Content-Type': 'application/json',
-        'Origin': 'https://www.tapelink.io',
-        'Referer': 'https://www.tapelink.io/',
-        'Accept': '*/*'
-    }
+    # URL-encode the Spotify URL
+    encoded_url = quote(spotify_url)
+    api_url = f"https://api.song.link/v1-alpha.1/links?url={encoded_url}"
 
     try:
-        # Step 1: Generate Link
-        response = session.post("https://www.tapelink.io/api/generate-link", json={"url": spotify_url}, headers=headers, timeout=10)
+        # We use a standard requests.get, but include our rotating headers 
+        # to appear more like a browser/legitimate client
+        response = requests.get(api_url, headers=get_headers(), timeout=10)
         
-        if response.status_code == 429: 
-            raise RateLimitException("Tapelink")
+        if response.status_code == 429:
+            raise RateLimitException("SongLink API")
         
         if response.status_code != 200:
-            print(f"      [Tapelink] API returned {response.status_code}", flush=True)
+            print(f"      [SongLink] API returned {response.status_code}", flush=True)
             return None
-        
+            
         data = response.json()
-
-        if not data.get('success'):
-            error_msg = data.get('error', data.get('message', 'unknown'))
-            print(f"      [Tapelink] API success=false: {error_msg}", flush=True)
-            # Check if this looks like rate limiting
-            if 'rate' in str(error_msg).lower() or 'limit' in str(error_msg).lower():
-                raise SoftRateLimitException("Tapelink rate limited")
-            return None
-
-        share_link_stub = data.get('shareableLink')
-        if not share_link_stub:
-            print(f"      [Tapelink] No shareableLink in response", flush=True)
-            return None
-
-        full_share_url = f"https://{share_link_stub}" if not share_link_stub.startswith("http") else share_link_stub
-
-        # Step 2: Scrape Data
-        page_response = session.get(full_share_url, headers=headers, timeout=10)
         
-        if page_response.status_code == 429: 
-            raise RateLimitException("Tapelink Page")
+        # Extract Apple Music URL
+        apple_music_url = data.get('linksByPlatform', {}).get('appleMusic', {}).get('url')
         
-        if page_response.status_code != 200:
-            print(f"      [Tapelink] Page returned {page_response.status_code}", flush=True)
-            return None
-
-        soup = BeautifulSoup(page_response.text, 'html.parser')
-        next_data_tag = soup.find('script', id='__NEXT_DATA__')
-        
-        if not next_data_tag:
-            print(f"      [Tapelink] No NEXT_DATA on page", flush=True)
-            return None
-
-        json_data = json.loads(next_data_tag.string)
-        initial_data = json_data['props']['pageProps']['initialSongData']
-        platforms = initial_data.get('platforms', {})
-        apple_link = platforms.get('apple_music')
-        
-        if apple_link:
-            print(f"      [Tapelink] Found Apple link", flush=True)
+        if apple_music_url:
+            print(f"      [SongLink] Direct link found", flush=True)
+            return apple_music_url
         else:
-            print(f"      [Tapelink] No apple_music in platforms: {list(platforms.keys())}", flush=True)
-        
-        return apple_link
+            print(f"      [SongLink] No Apple Music equivalent found in response", flush=True)
+            return None
 
-    except RateLimitException: 
+    except RateLimitException:
         raise
-    except SoftRateLimitException:
-        raise
-    except KeyError as e:
-        print(f"      [Tapelink] Missing key: {e}", flush=True)
-        return None
     except Exception as e:
-        print(f"      [Tapelink] Error: {e}", flush=True)
+        print(f"      [SongLink] Error: {e}", flush=True)
         return None
 
 # =============================================================================
@@ -418,7 +375,7 @@ def scrape_apple_metadata(apple_url):
 # MAIN LOGIC
 # =============================================================================
 def process_track(spotify_id, isrc):
-    global SQUIGLY_COOLDOWN_UNTIL, ODESLI_COOLDOWN_UNTIL, TAPELINK_COOLDOWN_UNTIL
+    global SQUIGLY_COOLDOWN_UNTIL, ODESLI_COOLDOWN_UNTIL, SONGLINK_COOLDOWN_UNTIL
     spotify_url = f"https://open.spotify.com/track/{spotify_id}"
     
     print(f"   [Processing] {spotify_id}", flush=True)
@@ -441,8 +398,9 @@ def process_track(spotify_id, isrc):
         start_ts = time.time()
         results = []
         should_retry = False
+        rate_limit_hits = 0  # Track how many providers hit limits in this cycle
 
-        # PHASE 1: Primary Providers in Parallel (Odesli & Tapelink)
+        # PHASE 1: Primary Providers in Parallel (Odesli & SongLink)
         with ThreadPoolExecutor(max_workers=2) as executor:
             future_to_provider = {}
             
@@ -451,10 +409,10 @@ def process_track(spotify_id, isrc):
             else:
                 print(f"      [Odesli] On cooldown, skipping", flush=True)
                 
-            if time.time() > TAPELINK_COOLDOWN_UNTIL:
-                future_to_provider[executor.submit(check_provider, resolve_tapelink, "Tapelink")] = "Tapelink"
+            if time.time() > SONGLINK_COOLDOWN_UNTIL:
+                future_to_provider[executor.submit(check_provider, resolve_songlink_api, "SongLink")] = "SongLink"
             else:
-                print(f"      [Tapelink] On cooldown, skipping", flush=True)
+                print(f"      [SongLink] On cooldown, skipping", flush=True)
 
             for future in as_completed(future_to_provider):
                 provider_name = future_to_provider[future]
@@ -467,32 +425,38 @@ def process_track(spotify_id, isrc):
                     if provider_name == "Odesli":
                         ODESLI_COOLDOWN_UNTIL = time.time() + 120
                     else:
-                        TAPELINK_COOLDOWN_UNTIL = time.time() + 120
+                        SONGLINK_COOLDOWN_UNTIL = time.time() + 120
                     should_retry = True
+                    rate_limit_hits += 1
                 except SoftRateLimitException:
                     print(f"      [SOFT 429] {provider_name} soft rate limited. Cooldown 2 min.", flush=True)
                     if provider_name == "Odesli":
                         ODESLI_COOLDOWN_UNTIL = time.time() + 120
                     else:
-                        TAPELINK_COOLDOWN_UNTIL = time.time() + 120
+                        SONGLINK_COOLDOWN_UNTIL = time.time() + 120
                     should_retry = True
+                    rate_limit_hits += 1
                 except Exception as e:
                     print(f"      [{provider_name}] Error: {e}", flush=True)
 
         # PHASE 2: Fallback (Squigly) if no results yet
-        if not results and time.time() > SQUIGLY_COOLDOWN_UNTIL:
-            try:
-                print(f"      Trying Squigly (fallback)...", flush=True)
-                link = resolve_squigly(spotify_url)
-                if link:
-                    meta = scrape_apple_metadata(link)
-                    if meta:
-                        results.append(meta)
-            except RateLimitException:
-                print(f"      [429] Squigly rate limited. Cooldown 2 min.", flush=True)
-                SQUIGLY_COOLDOWN_UNTIL = time.time() + 120
-            except Exception as e:
-                print(f"      [Squigly] Unexpected: {e}", flush=True)
+        if not results:
+            if time.time() > SQUIGLY_COOLDOWN_UNTIL:
+                try:
+                    print(f"      Trying Squigly (fallback)...", flush=True)
+                    link = resolve_squigly(spotify_url)
+                    if link:
+                        meta = scrape_apple_metadata(link)
+                        if meta:
+                            results.append(meta)
+                except RateLimitException:
+                    print(f"      [429] Squigly rate limited. Cooldown 2 min.", flush=True)
+                    SQUIGLY_COOLDOWN_UNTIL = time.time() + 120
+                    rate_limit_hits += 1
+                except Exception as e:
+                    print(f"      [Squigly] Unexpected: {e}", flush=True)
+            else:
+                print(f"      [Squigly] On cooldown, skipping", flush=True)
 
         elapsed = time.time() - start_ts
 
@@ -508,10 +472,16 @@ def process_track(spotify_id, isrc):
                 'updated_at': int(time.time() / 86400)
             }
 
-        # If providers rate limited, wait and retry
-        if should_retry:
+        # CRITICAL STOP: If more than 1 provider failed due to rate limits
+        if rate_limit_hits > 1:
+            print(f"   [CRITICAL] Multiple providers ({rate_limit_hits}) rate limited. Pausing process for 5 minutes...", flush=True)
+            time.sleep(300)
+
+        # If providers rate limited (single or multiple), retry logic
+        if should_retry or rate_limit_hits > 0:
             retry_count += 1
             if retry_count < max_retries:
+                # If we just slept 300s, this extra wait is negligible but keeps logic consistent
                 wait_time = min(30 * retry_count, 120)
                 print(f"   [RETRY] Waiting {wait_time}s before retry {retry_count}/{max_retries}...", flush=True)
                 time.sleep(wait_time)

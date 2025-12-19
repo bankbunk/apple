@@ -42,7 +42,7 @@ ODESLI_COOLDOWN_UNTIL = 0
 SONGLINK_COOLDOWN_UNTIL = 0
 
 # Minimum time each track processing must take (smart delay)
-MIN_TRACK_DURATION = 1.5  # seconds
+MIN_TRACK_DURATION = 2  # seconds
 
 # Add delay between tracks to avoid rate limits
 REQUEST_DELAY = 0.5  # seconds between tracks

@@ -4,7 +4,6 @@ import json
 import re
 import time
 import random
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urlparse, parse_qs, urlencode, urlunparse, quote
 from bs4 import BeautifulSoup
 
@@ -583,10 +582,16 @@ def run_job():
                 else:
                     print("Batch failed, will retry with next batch", flush=True)
 
-            # 2. Smart Delay: Ensure total time taken is at least MIN_TRACK_DURATION
+            # --- TIMING CONTROL ---
+
+            # 1. Smart Delay: Ensure total processing time hits the minimum floor
             elapsed_track = time.time() - track_start_time
             if elapsed_track < MIN_TRACK_DURATION:
                 time.sleep(MIN_TRACK_DURATION - elapsed_track)
+
+            # 2. Hard Request Delay: Force a gap between tracks
+            if REQUEST_DELAY > 0:
+                time.sleep(REQUEST_DELAY)
 
         if updates:
             print(f"--- 2. Sending final batch of {len(updates)} updates to Turso ---", flush=True)

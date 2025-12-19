@@ -337,6 +337,8 @@ def scrape_apple_metadata(apple_url):
             print(f"      [Apple] HTTP {response.status_code} for {apple_url}", flush=True)
             return None
 
+        response.encoding = 'utf-8'
+
         jsonld_pattern = r'<script[^>]*type="application/ld\+json"[^>]*>(.*?)</script>'
         matches = re.findall(jsonld_pattern, response.text, re.DOTALL)
 

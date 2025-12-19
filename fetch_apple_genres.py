@@ -24,6 +24,9 @@ WORKER_URL = os.environ.get("TURSO_WORKER_URL")
 WORKER_INDEX = int(os.environ.get("WORKER_INDEX", 0))
 TOTAL_WORKERS = int(os.environ.get("TOTAL_WORKERS", 1))
 
+CURRENT_PRIMARY_PROVIDER = "Odesli"
+# --------------------------------------------------
+
 PROCESS_LIMIT = 0
 
 START_TIME = time.time()
@@ -383,120 +386,104 @@ def scrape_apple_metadata(apple_url):
 # =============================================================================
 def process_track(spotify_id, isrc):
     global SQUIGLY_COOLDOWN_UNTIL, ODESLI_COOLDOWN_UNTIL, SONGLINK_COOLDOWN_UNTIL
-    spotify_url = f"https://open.spotify.com/track/{spotify_id}"
-    
-    print(f"   [Processing] {spotify_id}", flush=True)
+    global CURRENT_PRIMARY_PROVIDER # Allows the switch to persist for the NEXT track
 
-    def check_provider(resolver_func, provider_name):
-        try:
-            link = resolver_func(spotify_url)
-            if link:
-                return scrape_apple_metadata(link)
-        except (RateLimitException, SoftRateLimitException):
-            raise
-        except Exception as e:
-            print(f"      [{provider_name}] Unexpected: {e}", flush=True)
-        return None
+    spotify_url = f"https://open.spotify.com/track/{spotify_id}"
+    print(f"   [Processing] {spotify_id} (Primary: {CURRENT_PRIMARY_PROVIDER})", flush=True)
 
     max_retries = 3
     retry_count = 0
-    
+
     while retry_count < max_retries:
         start_ts = time.time()
-        results = []
-        should_retry = False
-        rate_limit_hits = 0  # Track how many providers hit limits in this cycle
+        
+        # 1. CRITICAL HEALTH CHECK: Are BOTH primaries broken?
+        odesli_down = time.time() < ODESLI_COOLDOWN_UNTIL
+        songlink_down = time.time() < SONGLINK_COOLDOWN_UNTIL
 
-        # PHASE 1: Primary Providers in Parallel (Odesli & SongLink)
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            future_to_provider = {}
+        if odesli_down and songlink_down:
+            print(f"   [CRITICAL] Both Odesli and SongLink are rate limited. Sleeping 5 minutes...", flush=True)
+            time.sleep(300)
+            # After sleep, reset cooldowns (or just let the loop retry naturally)
+            # We treat the sleep as the 'penalty'
+            pass 
+
+        # 2. SELECT PROVIDER
+        # If our current primary is down, switch to the other one immediately
+        if CURRENT_PRIMARY_PROVIDER == "Odesli" and odesli_down:
+            print(f"      [Switch] Odesli is down, switching to SongLink", flush=True)
+            CURRENT_PRIMARY_PROVIDER = "SongLink"
+        elif CURRENT_PRIMARY_PROVIDER == "SongLink" and songlink_down:
+            print(f"      [Switch] SongLink is down, switching to Odesli", flush=True)
+            CURRENT_PRIMARY_PROVIDER = "Odesli"
+
+        # 3. DEFINE EXECUTION
+        if CURRENT_PRIMARY_PROVIDER == "Odesli":
+            resolver_func = resolve_odesli
+            provider_name = "Odesli"
+        else:
+            resolver_func = resolve_songlink_api
+            provider_name = "SongLink"
+
+        # 4. EXECUTE PRIMARY
+        apple_url = None
+        try:
+            apple_url = resolver_func(spotify_url)
             
-            if time.time() > ODESLI_COOLDOWN_UNTIL:
-                future_to_provider[executor.submit(check_provider, resolve_odesli, "Odesli")] = "Odesli"
+        except (RateLimitException, SoftRateLimitException):
+            print(f"      [429] {provider_name} failed. Marking cooldown & switching.", flush=True)
+            
+            # Set Cooldown
+            if provider_name == "Odesli":
+                ODESLI_COOLDOWN_UNTIL = time.time() + 120
+                CURRENT_PRIMARY_PROVIDER = "SongLink" # Switch for next retry
             else:
-                print(f"      [Odesli] On cooldown, skipping", flush=True)
-                
-            if time.time() > SONGLINK_COOLDOWN_UNTIL:
-                future_to_provider[executor.submit(check_provider, resolve_songlink_api, "SongLink")] = "SongLink"
-            else:
-                print(f"      [SongLink] On cooldown, skipping", flush=True)
+                SONGLINK_COOLDOWN_UNTIL = time.time() + 120
+                CURRENT_PRIMARY_PROVIDER = "Odesli" # Switch for next retry
+            
+            retry_count += 1
+            continue # Loop again immediately to try the OTHER provider
 
-            for future in as_completed(future_to_provider):
-                provider_name = future_to_provider[future]
-                try:
-                    data = future.result()
-                    if data:
-                        results.append(data)
-                except RateLimitException:
-                    print(f"      [429] {provider_name} rate limited. Cooldown 2 min.", flush=True)
-                    if provider_name == "Odesli":
-                        ODESLI_COOLDOWN_UNTIL = time.time() + 120
-                    else:
-                        SONGLINK_COOLDOWN_UNTIL = time.time() + 120
-                    should_retry = True
-                    rate_limit_hits += 1
-                except SoftRateLimitException:
-                    print(f"      [SOFT 429] {provider_name} soft rate limited. Cooldown 2 min.", flush=True)
-                    if provider_name == "Odesli":
-                        ODESLI_COOLDOWN_UNTIL = time.time() + 120
-                    else:
-                        SONGLINK_COOLDOWN_UNTIL = time.time() + 120
-                    should_retry = True
-                    rate_limit_hits += 1
-                except Exception as e:
-                    print(f"      [{provider_name}] Error: {e}", flush=True)
+        except Exception as e:
+            print(f"      [{provider_name}] Error: {e}", flush=True)
+            # Generic error, maybe try squigly?
 
-        # PHASE 2: Fallback (Squigly) if no results yet
-        if not results:
-            if time.time() > SQUIGLY_COOLDOWN_UNTIL:
-                try:
-                    print(f"      Trying Squigly (fallback)...", flush=True)
-                    link = resolve_squigly(spotify_url)
-                    if link:
-                        meta = scrape_apple_metadata(link)
-                        if meta:
-                            results.append(meta)
-                except RateLimitException:
-                    print(f"      [429] Squigly rate limited. Cooldown 2 min.", flush=True)
-                    SQUIGLY_COOLDOWN_UNTIL = time.time() + 120
-                    rate_limit_hits += 1
-                except Exception as e:
-                    print(f"      [Squigly] Unexpected: {e}", flush=True)
-            else:
-                print(f"      [Squigly] On cooldown, skipping", flush=True)
+        # 5. PROCESS RESULT OR FALLBACK
+        final_meta = None
+
+        # If Primary worked
+        if apple_url:
+            final_meta = scrape_apple_metadata(apple_url)
+
+        # If Primary failed to find link (Not a 429, just 404/Empty), try Squigly
+        if not final_meta and time.time() > SQUIGLY_COOLDOWN_UNTIL:
+            try:
+                print(f"      [Fallback] Trying Squigly...", flush=True)
+                squigly_link = resolve_squigly(spotify_url)
+                if squigly_link:
+                    final_meta = scrape_apple_metadata(squigly_link)
+            except RateLimitException:
+                print(f"      [429] Squigly rate limited.", flush=True)
+                SQUIGLY_COOLDOWN_UNTIL = time.time() + 120
 
         elapsed = time.time() - start_ts
 
-        # If we got results, return them
-        if results:
-            results.sort(key=lambda x: x['date'] if x['date'] else '9999-99-99')
-            best_match = results[0]
-            print(f"   [FOUND] {spotify_id} -> {best_match['date']} | Genres: {best_match['genres']} ({elapsed:.2f}s)", flush=True)
+        # 6. RETURN SUCCESS
+        if final_meta:
+            # Clean genres logic is inside scrape_apple_metadata, so we trust it
+            print(f"   [FOUND] {spotify_id} -> {final_meta['date']} | Genres: {final_meta['genres']} ({elapsed:.2f}s)", flush=True)
             return {
                 'isrc': isrc,
                 'track_id': spotify_id,
-                'apple_music_genres': json.dumps(best_match['genres']),
+                'apple_music_genres': json.dumps(final_meta['genres']),
                 'updated_at': int(time.time() / 86400)
             }
-
-        # CRITICAL STOP: If more than 1 provider failed due to rate limits
-        if rate_limit_hits > 1:
-            print(f"   [CRITICAL] Multiple providers ({rate_limit_hits}) rate limited. Pausing process for 5 minutes...", flush=True)
-            time.sleep(300)
-
-        # If providers rate limited (single or multiple), retry logic
-        if should_retry or rate_limit_hits > 0:
-            retry_count += 1
-            if retry_count < max_retries:
-                # If we just slept 300s, this extra wait is negligible but keeps logic consistent
-                wait_time = min(30 * retry_count, 120)
-                print(f"   [RETRY] Waiting {wait_time}s before retry {retry_count}/{max_retries}...", flush=True)
-                time.sleep(wait_time)
-                continue
         
+        # If we reached here, no data found this attempt.
+        # Since we didn't hit a `continue` (Rate Limit), we assume legitimate "Not Found".
         break
 
-    print(f"   [SKIP] No Apple data found for {spotify_id} ({elapsed:.2f}s)", flush=True)
+    print(f"   [SKIP] No Apple data found for {spotify_id}", flush=True)
     return None
 
 BATCH_SIZE = 100

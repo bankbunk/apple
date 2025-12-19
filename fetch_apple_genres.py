@@ -32,7 +32,10 @@ GENRES_TO_KEEP_WHOLE = [
 
 SQUIGLY_COOLDOWN_UNTIL = 0
 ODESLI_COOLDOWN_UNTIL = 0
-SONGLINK_COOLDOWN_UNTIL = 0  # Renamed from TAPELINK
+SONGLINK_COOLDOWN_UNTIL = 0
+
+# Minimum time each track processing must take (smart delay)
+MIN_TRACK_DURATION = 1.5  # seconds
 
 # Add delay between tracks to avoid rate limits
 REQUEST_DELAY = 0.5  # seconds between tracks
@@ -554,6 +557,9 @@ def run_job():
         total_sent = 0
 
         for i, t in enumerate(tracks):
+            # 1. Start timer for this track
+            track_start_time = time.time()
+
             if (time.time() - START_TIME) >= MAX_RUNTIME_SECONDS:
                 print(f"--- TIME LIMIT REACHED - Stopping gracefully ---", flush=True)
                 break
@@ -572,9 +578,6 @@ def run_job():
             except Exception as e:
                 print(f"Error processing {t['id']}: {e}", flush=True)
 
-            # ADD DELAY between tracks to avoid rate limits
-            time.sleep(REQUEST_DELAY)
-
             if len(updates) >= BATCH_SIZE:
                 print(f"--- Reached {BATCH_SIZE} tracks (Total processed: {i + 1}/{len(tracks)}) ---", flush=True)
                 if send_updates_to_turso(updates):
@@ -582,6 +585,11 @@ def run_job():
                     updates = []
                 else:
                     print("Batch failed, will retry with next batch", flush=True)
+
+            # 2. Smart Delay: Ensure total time taken is at least MIN_TRACK_DURATION
+            elapsed_track = time.time() - track_start_time
+            if elapsed_track < MIN_TRACK_DURATION:
+                time.sleep(MIN_TRACK_DURATION - elapsed_track)
 
         if updates:
             print(f"--- 2. Sending final batch of {len(updates)} updates to Turso ---", flush=True)
@@ -592,6 +600,6 @@ def run_job():
 
         if not continuous_mode:
             break
-
+        
 if __name__ == "__main__":
     run_job()

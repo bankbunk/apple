@@ -513,7 +513,9 @@ def process_track(spotify_id, isrc):
     print(f"   [SKIP] No Apple data found for {spotify_id} ({elapsed:.2f}s)", flush=True)
     return None
 
-BATCH_SIZE = 100
+# Updated Batch sizes for efficiency
+BATCH_SIZE = 100       # Send updates to Turso every 100 tracks
+SNAPSHOT_SIZE = 1000   # Fetch 1000 items from DB in one go to reduce read queries
 
 def send_updates_to_turso(updates):
     """Send a batch of updates to Turso"""
@@ -543,14 +545,22 @@ def run_job():
     print(f"--- Starting Job (Worker {WORKER_INDEX}/{TOTAL_WORKERS} | Continuous: {continuous_mode}) ---", flush=True)
 
     while (time.time() - START_TIME) < MAX_RUNTIME_SECONDS:
-        current_limit = 50 if continuous_mode else PROCESS_LIMIT
+        # SNAPSHOT STRATEGY: 
+        # Fetch a large chunk (SNAPSHOT_SIZE) once to save DB reads, 
+        # then process them all locally.
+        
+        # Determine fetch size
+        fetch_limit = SNAPSHOT_SIZE
+        if not continuous_mode:
+            # If we have a hard limit (e.g. 50), don't fetch 1000
+            remaining = PROCESS_LIMIT
+            fetch_limit = min(SNAPSHOT_SIZE, remaining)
 
-        print(f"--- 1. Fetching tracks (Limit: {current_limit}) ---", flush=True)
+        print(f"--- 1. Fetching Snapshot (Limit: {fetch_limit}) ---", flush=True)
 
         try:
-            # --- EDITED: Pass sharding params to API ---
             payload = {
-                "limit": current_limit,
+                "limit": fetch_limit,
                 "worker_index": WORKER_INDEX,
                 "total_workers": TOTAL_WORKERS
             }
@@ -575,7 +585,7 @@ def run_job():
                 print("No tracks need updating.", flush=True)
                 return
 
-        print(f"Processing {len(tracks)} tracks...", flush=True)
+        print(f"Snapshot received: Processing {len(tracks)} tracks locally...", flush=True)
 
         updates = []
         total_sent = 0
@@ -584,6 +594,7 @@ def run_job():
             # 1. Start timer for this track
             track_start_time = time.time()
 
+            # Check runtime limit inside the loop
             if (time.time() - START_TIME) >= MAX_RUNTIME_SECONDS:
                 print(f"--- TIME LIMIT REACHED - Stopping gracefully ---", flush=True)
                 break
@@ -602,6 +613,7 @@ def run_job():
             except Exception as e:
                 print(f"Error processing {t['id']}: {e}", flush=True)
 
+            # Send batch if we hit BATCH_SIZE
             if len(updates) >= BATCH_SIZE:
                 print(f"--- Reached {BATCH_SIZE} tracks (Total processed: {i + 1}/{len(tracks)}) ---", flush=True)
                 if send_updates_to_turso(updates):
@@ -611,25 +623,23 @@ def run_job():
                     print("Batch failed, will retry with next batch", flush=True)
 
             # --- TIMING CONTROL ---
-
-            # 1. Smart Delay: Ensure total processing time hits the minimum floor
             elapsed_track = time.time() - track_start_time
             if elapsed_track < MIN_TRACK_DURATION:
                 time.sleep(MIN_TRACK_DURATION - elapsed_track)
 
-            # 2. Hard Request Delay: Force a gap between tracks
             if REQUEST_DELAY > 0:
                 time.sleep(REQUEST_DELAY)
 
+        # End of Snapshot Loop: Send remaining updates
         if updates:
             print(f"--- 2. Sending final batch of {len(updates)} updates to Turso ---", flush=True)
             if send_updates_to_turso(updates):
                 total_sent += len(updates)
 
-        print(f"--- Cycle Done: Sent {total_sent} tracks ---", flush=True)
+        print(f"--- Snapshot Cycle Done: Sent {total_sent} tracks ---", flush=True)
 
         if not continuous_mode:
             break
-        
+           
 if __name__ == "__main__":
     run_job()
